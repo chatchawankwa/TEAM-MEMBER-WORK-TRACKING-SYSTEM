@@ -48,30 +48,12 @@
 
 ---
 
-## 📁 โครงสร้างระบบ
-
-```
-├── main.py
-├── update_task_incentive.py
-├── process_tasks.py
-├── data_import.py
-├── smartcare_sync.py
-├── utils/
-│   ├── line_notify.py
-│   ├── date_utils.py
-├── config/
-│   └── config.json
-├── images/
-│   ├── dashboard.png
-│   ├── certificate_1.jpg
-│   └── presentation_event.jpg
-```
 
 ---
 
 ## 🏅 การนำเสนอผลงาน
 
-- โครงงานนี้เคยนำเสนอในงานแสดงผลงานนักศึกษา
+- โครงงานนี้เคยนำเสนอในงานแสดงผลงานนักศึกษาและเป็นโปรเจกต์จบการศึกษา
 - ได้รับ **เกียรติบัตร 2 ฉบับ** และมีภาพถ่ายจากการพรีเซนต์จริง
 - เน้นความสามารถในการประยุกต์ใช้ Python + MIS
 
