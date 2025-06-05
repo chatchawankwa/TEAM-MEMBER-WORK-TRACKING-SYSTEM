@@ -1,0 +1,705 @@
+โค้ด Python ทั้งหมด
+"""
+# ===== 1. การนำเข้าไลบรารีที่จำเป็น (Import Libraries) =====
+"""
+import saspy
+import pandas as pd
+import pyodbc
+import requests
+import traceback
+import numpy as np
+import warnings
+import re
+from datetime import datetime
+import os
+warnings.filterwarnings('ignore', category=UserWarning)
+
+"""
+# ===== 2. ฟังก์ชันสำหรับการจัดการไฟล์และวันที่ (File and Date Management Functions) =====
+"""
+def get_file_modified_date(file_path):
+    timestamp = os.path.getmtime(file_path)
+    print("Timestamp:", timestamp)
+    return datetime.fromtimestamp(timestamp)
+
+def format_date_column(data, column_name):  # การปรับเปลี่ยน Format ของค่าเวลาต่าง ให้สามารถส่งเข้า Database ได้
+    if column_name in data.columns:
+        data[column_name] = pd.to_datetime(data[column_name], errors='coerce')
+        data[column_name] = data[column_name].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else 'Unknown Date')
+    else:
+        print(f"Column '{column_name}' not found in data")
+
+"""
+# ===== 3. ฟังก์ชันการส่งการแจ้งเตือนผ่าน Line (Line Notification Function) =====
+"""
+def send_line_notification(token, message, sticker_package_id=None, sticker_id=None): # เป็นฟังก์ชั่นเรียกใช้ Line notify ให้สามารถส่งไลน์ได้
+    """Send notification to LINE using the LINE Notify API."""
+    url = "https://notify-api.line.me/api/notify"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/x-www-form-urlencoded"}
+    data = {"message": message}
+    if sticker_package_id and sticker_id:
+        data["stickerPackageId"] = sticker_package_id
+        data["stickerId"] = sticker_id
+    response = requests.post(url, headers=headers, data=data)
+    print(f"Notification sent with status code: {response.status_code}")
+
+"""
+# ===== 4. ฟังก์ชันช่วยเหลือสำหรับการจัดการข้อมูล (Helper Functions for Data Management) =====
+"""
+def escape_single_quotes(value): #เป็นการเพิ่มค่า ในกรณีที่ 'Hi ให้เป็น 'Hi'
+    if isinstance(value, str):
+        return value.replace("'", "''")
+    return value
+
+def format_alert_message(No, old_date, new_date): #รูปแบบการส่งค่าของการเปลี่ยนแปลง
+    return f" No: {No}\n - From: {old_date} ➡️ To: {new_date}"
+"""
+# ===== 5. ฟังก์ชันอัพเดทข้อมูลงานและแรงจูงใจ (Task Incentive Update Function) =====
+"""
+def update_task_incentive(excel_file_path, user_name, usercheck, animal_emoji): #ส่วนของการ Update ข้อมูลเข้าdatabase
+    messages = []
+    try:
+        data = pd.read_excel(excel_file_path, skiprows=0)
+        data.replace('nan', np.nan, inplace=True)  # Replace 'nan' string with np.nan if any
+        data.dropna(subset=['Task'], inplace=True) # ลบแถวที่ไม่มีค่าในคอลัมน์ Task
+        if 'No' in data.columns:
+            # data['No'] = data['No'].apply(lambda x: str(int(x)) if pd.notna(x) and x != '' else x)
+            # data.dropna(subset=['No'], inplace=True)
+            # data['No'] = usercheck + data['No'].str.zfill(2)
+            data['No'] = data['No'].apply(lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x).strip())
+
+            data.dropna(subset=['No'], inplace=True)
+            data['No'] = usercheck + data['No'].str.zfill(2)
+            date_columns = ['Due Date', 'Plan Start Date', 'Plan End Date']
+            for col in date_columns:
+                format_date_column(data, col)
+               
+            data['Status'] = data['Status'].str.upper()
+            data = data.astype(str)
+            # Escape single quotes in all string fields
+            for col in data.select_dtypes(include=[object]).columns:
+                data[col] = data[col].map(escape_single_quotes)
+           
+            sas = saspy.SASsession(cfgname='winiomwin')
+            # print(sas.saslog())
+            #เป็นการประกาศใช้เส้นทางของ SAS เพื่อส่งข้อมูลไป Database
+            libname_statement = """
+            LIBNAME SQLSVR
+                DATASRC= 
+                SCHEMA=dbo
+                AUTHDOMAIN=mssqlauth;
+            """
+            sas.submit(libname_statement)
+            modified_date = get_file_modified_date(excel_file_path).strftime('%Y-%m-%d %H:%M:%S')
+
+            for index, row in data.iterrows():#วนลูปจากค่าใน row ไฟล์ทั้งหมด
+                update_query = f"""
+                PROC SQL;
+                    CONNECT TO SQLSVR AS (DATASRC= AUTHDOMAIN=mssqlauth);
+                    CREATE TABLE WORK.UpdateResult AS
+                    SELECT *, '{row['Due Date']}' AS NewDueDate
+                    FROM CONNECTION TO  (
+                        EXEC dbo.sp_UpdateTask_Incentive
+                            @No = '{row['No']}' ,
+                            @Type = '{row['Type']}' ,
+                            @Task = '{row['Task']}' ,
+                            @DueDate = '{row['Due Date']}' ,
+                            @Status = '{row['Status']}' ,
+                            @Owner = '{row['Owner']}' ,
+                            @PlanStartDate = '{row['Plan Start Date']}' ,
+                            @PlanEndDate = '{row['Plan End Date']}' ,
+                            @Remark = '{row['Remark']}' ,
+                            @Time = '{row['Time']}' ,
+                            @Percent = '{row['Percent']}' ,
+                            @ModifiedDate = '{modified_date}' ,
+                            @OperationType = 'U'
+                    );
+                    DISCONNECT FROM ;
+                QUIT;
+                """
+                result = sas.submit(update_query)
+                update_result = sas.sasdata('UpdateResult', 'WORK').to_df()
+               
+                if not update_result.empty and 'OldDueDate' in update_result.columns:
+                    old_due_date = update_result.at[0, 'OldDueDate']
+                    new_due_date = update_result.at[0, 'NewDueDate']
+                    if old_due_date != new_due_date and new_due_date != 'Unknown Date':
+                        message = format_alert_message(row['No'], old_due_date, new_due_date)
+                        messages.append(message)
+
+    except Exception as e:
+        print("An error occurred during database connection test:")
+        print(e)
+    finally:
+        # ปิด SAS session
+        if 'sas' in locals():
+            sas.endsas()
+        # Send accumulated messages
+        if messages:
+            full_message = f"{animal_emoji} *User:* {user_name}  {animal_emoji}{animal_emoji}\n*Alerts* ??: Due Date Change\n" + "\n".join(messages)
+            send_line_notification(CONFIG['line_token'], full_message)
+
+"""
+# ===== 6. ฟังก์ชันประมวลผลงาน (Task Processing Function) =====
+"""
+def process_tasks(user_name, usercheck, animal_emoji, line_token):
+    print(f"{animal_emoji} User: {user_name}\n🚨 Alerts: Due Date Change")
+    messages = []
+    try:
+        sas = saspy.SASsession(cfgname='winiomwin')
+       
+        # Execute the stored procedure to retrieve tasks
+        libname_statement = """
+        LIBNAME SQLSVR
+            DATASRC=
+            SCHEMA=dbo
+            AUTHDOMAIN=mssqlauth;
+        """
+        sas.submit(libname_statement)
+       
+        proc_sql_query = """
+        PROC SQL;
+            CONNECT TO SQLSVR AS (DATASRC=AUTHDOMAIN=mssqlauth);
+            CREATE TABLE WORK.TaskResults AS
+            SELECT *
+            FROM CONNECTION TO (
+                EXEC sp_UpdateTask_Incentive @OperationType = 'R'
+            );
+            DISCONNECT FROM;
+        QUIT;
+        """
+        sas.submit(proc_sql_query)
+       
+        # Retrieve the results from the SAS work library
+        task_results = sas.sasdata('TaskResults', 'WORK')
+        results = task_results.to_df()
+
+        current_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tasks_by_category = {
+            '🔥 Overdue tasks:': [],
+            '🚨 Tasks due today:': [],
+            '⏰ Tasks due soon:': [],
+            '🆕❗ New tasks Over starting:': [],
+            '🆕 New tasks starting today:': [],
+            '🆕 New tasks starting soon:': []
+        }
+
+        for index, result in results.iterrows():
+            prefix = re.split(r'(\d+)', result['No'])[0] #ตัดตัว User check ออกเช่น B01 = B แล้วเอาไปใช้กำหนดเงื่อนไข
+            if usercheck == prefix:
+                try:
+                    due_date = datetime.strptime(result['Due Date'], '%Y-%m-%d')
+                    plan_start = datetime.strptime(result['Plan Start Date'], '%Y-%m-%d')  # Assuming Plan Start Date is at index 4
+                except ValueError:
+                    continue  # Skip this result if the date format is incorrect
+                   
+                days_difference = (due_date - current_datetime).days    
+#ค่าของduedate ที่ดึงมาลบกับเวลาปัจจุบัน
+                day_Newdifference = (plan_start - current_datetime).days 
+#ค่าของplan_start ที่ดึงมาลบกับเวลาปัจจุบัน
+                task_detail = f"- Task: {result['Task']}, Status: {result['Status']}"
+
+                if result['Status'] == 'DOING':
+                    if days_difference < 0:
+                        task_detail += f", Overdue by {-days_difference} days"
+                        tasks_by_category['🔥 Overdue tasks:'].append(task_detail)
+                    elif days_difference == 0:
+                        task_detail += ", Due Today"
+                        tasks_by_category['🚨 Tasks due today:'].append(task_detail)
+                    elif days_difference > 0:
+                        task_detail += f", Due in {days_difference} days"
+                        tasks_by_category['⏰ Tasks due soon:'].append(task_detail)
+               
+                elif result['Status'] == 'NEW':
+                    if day_Newdifference < 0:
+                        new_task_detail = task_detail + f", Over Plan Starts in {day_Newdifference} days"
+                        tasks_by_category['🆕❗ New tasks Over starting:'].append(new_task_detail)
+                    elif day_Newdifference == 0:
+                        new_task_detail = task_detail + ", Starts Today"
+                        tasks_by_category['🆕 New tasks starting today:'].append(new_task_detail)
+                    elif day_Newdifference > 0:
+                        new_task_detail = task_detail + f", Starts in {day_Newdifference} days"
+                        tasks_by_category['🆕 New tasks starting soon:'].append(new_task_detail)
+       
+        message_lines = [f" User: {user_name} - Task Updates {animal_emoji} {animal_emoji} {animal_emoji}"]
+        for category, tasks in tasks_by_category.items():
+            if tasks:
+                message_lines.append(f"{category}")
+                message_lines.extend(tasks)
+                message_lines.append('---------------------------------')  # Visual separator after each category
+
+        full_message = "\n".join(message_lines)
+        send_line_notification(CONFIG['line_token'], full_message)
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Send accumulated messages
+        for message in messages:
+            send_line_notification(line_token, message)
+        if 'sas' in locals():
+            sas.endsas()
+
+"""
+# ===== 7. การกำหนดค่าคงที่และการเรียกใช้ฟังก์ชัน (Configuration and Function Calls) =====
+"""
+CONFIG = {
+    'line_token': 'LineTokenGroup',
+}
+
+if __name__ == "__main__":
+    user_configs = [
+        {'path': 'NamePath', 'user_name': 'nickname', 'usercheck': 'M', 'animal_emoji': ''},
+    ]
+
+    # Process each user's task
+    for config in user_configs:
+        update_task_incentive(config['path'], config['user_name'], config['usercheck'], config['animal_emoji'])
+        process_tasks(config['user_name'], config['usercheck'], config['animal_emoji'], CONFIG['line_token'])
+
+"""
+# ===== 8. ฟังก์ชันนำเข้าข้อมูลงานจากฐานข้อมูล (Import Task Data Functions) =====
+"""
+def ImportDataTaskWork(sas):
+    try:
+        sas_code = """
+        PROC SQL;
+        CONNECT TO SQLSVR AS myconn (DATASRC= AUTHDOMAIN=mssqlauth);
+        CREATE TABLE WORK.TaskData AS
+        SELECT *
+        FROM CONNECTION TO myconn (
+            EXEC sp_UpdateTask_Incentive @OperationType = 'C'
+        );
+        DISCONNECT FROM myconn;
+        QUIT;
+        """
+        sas.submit(sas_code)
+        df = sas.sasdata('TaskData', 'WORK').to_df()
+
+        processed_data = []
+        for _, row in df.iterrows():
+            row_list = list(row)
+            task_value = row_list[df.columns.get_loc('Task')]
+
+            # ใช้ regex เพื่อหา ID
+            pattern = re.compile(r'[S|s]\d{8} >> Refer S\d{8}')
+            match = pattern.search(task_value)
+            if match:
+                refer_id = re.search(r'Refer ([S|s]\d{8})', task_value)
+                IDsmartcare = refer_id.group(1) if refer_id else ''
+            else:
+                match = re.search(r'[S|s]\d{8}', task_value)
+                IDsmartcare = match.group(0) if match else ''
+
+            row_list.append(IDsmartcare)
+            processed_data.append(row_list)
+
+        df_processed = pd.DataFrame(processed_data, columns=list(df.columns) + ['IDsmartcare'])
+        return df_processed
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        traceback.print_exc()
+        return pd.DataFrame()
+
+def ImportDataTaskUser(sas, columns_to_select=None):
+    try:
+        select_columns = ', '.join(columns_to_select) if columns_to_select else '*'
+
+        sas_code = f"""
+        PROC SQL;
+        CONNECT TO SQLSVR AS myconn (DATASRC= AUTHDOMAIN=mssqlauth);
+        CREATE TABLE WORK.TasklistEmp AS
+        SELECT {select_columns}
+        FROM CONNECTION TO myconn (
+            SELECT {select_columns} FROM Tasklist_emp_mis
+        );
+        DISCONNECT FROM myconn;
+        QUIT;
+        """
+        sas.submit(sas_code)
+        df = sas.sasdata('TasklistEmp', 'WORK').to_df()
+        return df
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        traceback.print_exc()
+        return pd.DataFrame()
+
+"""
+# ===== 9. ฟังก์ชันสร้างตารางในฐานข้อมูลจาก DataFrame (Create SQL Table from DataFrame) =====
+"""
+def create_sql_table_from_df(sas, df, table_name):
+    try:
+        # Establish connection to SQL Server using LIBNAME
+        libname_statement = """
+            LIBNAME SQLSVR
+            DATASRC=
+            SCHEMA=dbo
+            AUTHDOMAIN=mssqlauth;
+        """
+        sas.submit(libname_statement)
+        print(f"Total rows in DataFrame: {len(df)}")
+
+        for index, row in df.iterrows():
+            print(f"Processing row {index+1}/{len(df)}")
+
+            # Escaping single quotes in the data to prevent SQL errors
+            row_escaped = row.apply(lambda x: str(x).replace("'", "''") if pd.notnull(x) else '')
+
+            # Formatting specific date fields correctly
+            # ??????????? CONVERT ?? SQL ?????????????????????????????????? 'YYYY-MM-DD'
+            work_completed = f"'{row_escaped['Work Completed']}'" if row_escaped['Work Completed'] != '' else 'NULL'
+            start_record_date = f"'{row_escaped['Start_Record_Date']}'" if row_escaped['Start_Record_Date'] != '' else 'NULL'
+            # SQL to call the stored procedure with the parameters from the DataFrame row
+            sp_call = f"""
+            PROC SQL;
+                CONNECT TO SQLSVR AS (DATASRC=  AUTHDOMAIN=mssqlauth);
+                EXECUTE (
+                    EXEC dbo.sp_UpdateTask_Incentive
+                        @No = '{row_escaped['No']}',
+                        @Type = '{row_escaped['Type']}',
+                        @IDsmartcare = '{row_escaped['IDsmartcare']}',
+                        @Task = '{row_escaped['Task']}',
+                        @DueDate = '{row_escaped['Due Date']}',
+                        @Status = '{row_escaped['Status']}',
+                        @Owner = '{row_escaped['Owner']}',
+                        @PlanStartDate = '{row_escaped['Plan Start Date']}',
+                        @PlanEndDate = '{row_escaped['Plan End Date']}',
+                        @Remark = '{row_escaped['Remark']}',
+                        @Time = '{row_escaped['Time']}',
+                        @Percent = '{row_escaped['Percent']}',
+                        @WorkCompleted = {work_completed},
+                        @ModifiedDate = '{row_escaped['Modified Date']}',
+                        @StartRecordDate = {start_record_date},
+                        @EMPID = '{row_escaped['EMPID']}',
+                        @fname_eng = '{row_escaped['fname_eng']}',
+                        @lname_eng = '{row_escaped['lname_eng']}',
+                        @USR_EMAIL = '{row_escaped['USR_EMAIL']}',
+                        @nickname_eng = '{row_escaped['nickname_eng']}',
+                        @OperationType = 'A'
+                ) BY ;
+                DISCONNECT FROM ;
+            QUIT;
+            """
+            print(sp_call)
+           
+            result = sas.submit(sp_call)
+            if result.get('LOG'):
+                print(f"Log output for row {index+1}:", result['LOG'])
+
+        print(f"Stored procedure executed successfully for all rows in {table_name}.")
+    except Exception as e:
+        print(f"An error occurred while executing the stored procedure: {e}")
+
+"""
+# ===== 10. การเรียกใช้ฟังก์ชันนำเข้าและประมวลผลข้อมูล (Execution of Import and Processing Functions) =====
+"""
+# Example usage:
+sas = saspy.SASsession(cfgname='winiomwin')
+# ตั้งค่าเส้นทางการเชื่อมต่อกับ SQL Server
+libname_statement = """
+LIBNAME  SQLSVR
+    DATASRC=
+    SCHEMA=dbo
+    AUTHDOMAIN=mssqlauth;
+"""
+sas.submit(libname_statement)
+
+columns_to_select = ['EMPID', 'fname_eng', 'lname_eng', 'USR_EMAIL', 'nickname_eng']
+df_task_user = ImportDataTaskUser(sas, columns_to_select=columns_to_select)
+df_task_work = ImportDataTaskWork(sas)
+
+if not df_task_user.empty and not df_task_work.empty:
+    df_joined = pd.merge(df_task_work, df_task_user, how='inner', left_on='Owner', right_on='EMPID')
+    print(df_joined)
+   
+    create_sql_table_from_df(sas, df_joined, 'Tasklist_Incentive_FullDataEmp')
+else:
+    print("DataFrame ใดตัวหนึ่งหรือทั้งสองตัวว่างเปล่า ไม่สามารถทำการ Join ได้")
+
+sas.endsas()
+
+"""
+# ===== 11. การนำเข้าข้อมูลที่มี IDSmartcare (Import Data with IDSmartcare) =====
+"""
+import saspy
+import pandas as pd
+import traceback
+import warnings
+
+warnings.filterwarnings('ignore', category=UserWarning)
+
+def ImportDataWithIDSmartcare(sas):
+    try:
+        # สร้าง LIBNAME statement สำหรับเชื่อมต่อกับ SQL Server
+        libname_stmt = """
+        LIBNAME SQLDB SQLSVR
+        DATASRC=
+        SCHEMA=dbo
+        AUTHDOMAIN=mssqlauth;
+        """
+        sas.submit(libname_stmt)
+
+        # Query เพื่อดึงข้อมูลจากตาราง Tasklist_Incentive_FullDataEmp
+        query = """
+        PROC SQL;
+            CREATE TABLE work.temp_data AS
+            SELECT *
+            FROM SQLDB.Tasklist_Incentive_FullDataEmp;
+        QUIT;
+        """
+        sas.submit(query)
+
+        # ดึงข้อมูลจาก SAS dataset เป็น Pandas DataFrame
+        df = sas.sasdata2dataframe(table='temp_data', libref='work')
+
+        return df
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาด: {e}")
+        traceback.print_exc()
+        return pd.DataFrame()
+
+# เชื่อมต่อกับ SAS
+sas = saspy.SASsession(cfgname='winiomwin')
+
+# เรียกใช้ฟังก์ชันเพื่อดึงข้อมูล
+df_part1 = ImportDataWithIDSmartcare(sas)
+
+# ดึงค่า Owner และ IDsmartcare ที่ไม่ซ้ำกัน
+if not df_part1.empty:
+    owners = df_part1['Owner'].unique()
+    IDsmartcare = df_part1['IDsmartcare'].unique()
+    print("Unique Owners:", owners)
+    print("Unique IDsmartcare:", IDsmartcare)
+else:
+    print("ไม่มีข้อมูลหรือเกิดข้อผิดพลาดในการดึงข้อมูล")
+
+# ปิดการเชื่อมต่อ SAS
+sas.endsas()
+
+"""
+# ===== 12. การนำเข้าและประมวลผลข้อมูลจาก SQL Server โดยตรง (Direct SQL Server Import and Processing) =====
+"""
+import pandas as pd
+import pyodbc
+import traceback
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+
+def ImportAcceptTaskName(owners, IDsmartcare):
+    try:
+        # สร้าง connection string สำหรับเชื่อมต่อกับ SQL Server
+        conn_str = f"DRIVER={{SQL Server}};SERVER={CONFIG2['server']};DATABASE={CONFIG2['database']};UID={CONFIG2['username']};PWD={CONFIG2['password']}"
+       
+        # เชื่อมต่อกับฐานข้อมูล
+        with pyodbc.connect(conn_str) as conn:
+            cursor = conn.cursor()
+           
+            # สร้าง query โดยใช้ค่า Owner ที่ได้มาเพื่อดึง AcceptTask_Name
+            # แปลง Owner เป็น VARCHAR ใน SQL
+            placeholders = ', '.join('CAST(? AS VARCHAR(50))' for _ in owners)
+            query = f"""
+            SELECT DISTINCT AcceptTask_Name
+            FROM DASHBOARD_SMARTCARE
+            WHERE AcceptTask_By IN ({placeholders})
+            """
+            cursor.execute(query, tuple(owners))
+           
+            # ดึงผลลัพธ์และสร้าง list ของ AcceptTask_Name
+            accept_task_names = [row.AcceptTask_Name for row in cursor.fetchall()]
+            unique_values = list(set(accept_task_names))  # ใช้ set เพื่อหาค่า unique
+            print("Unique AcceptTask_Name:", unique_values)
+           
+            if unique_values:
+                # สร้าง query ที่สอง
+                placeholders_unique = ', '.join('?' for _ in unique_values)
+                placeholders_idsmartcare = ', '.join('?' for _ in IDsmartcare if pd.notna(_))
+               
+                query = f"""
+                SELECT TicketId, Description, AcceptTask_By, AcceptTask_Name, AcceptTask_TEAM, CreateDate
+                FROM DASHBOARD_SMARTCARE
+                WHERE Status = 'Waiting for Resolve'
+                AND AcceptTask_Name IN ({placeholders_unique})
+                """
+               
+                params = unique_values
+               
+                if placeholders_idsmartcare:
+                    query += f"AND TicketId NOT IN ({placeholders_idsmartcare})"
+                    params.extend([id for id in IDsmartcare if pd.notna(id)])
+               
+                # Execute query
+                cursor.execute(query, params)
+               
+                # ดึงผลลัพธ์และสร้าง DataFrame
+                columns = [column[0] for column in cursor.description]
+                results = [list(row) for row in cursor.fetchall()]
+                df_final = pd.DataFrame(results, columns=columns)
+                return df_final
+            else:
+                print("ไม่พบค่า AcceptTask_Name ที่ไม่ซ้ำกัน")
+                return pd.DataFrame()
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาด: {e}")
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
+CONFIG2 = {
+    'server': '',
+    'database': '',
+    'line_token': '',
+    'username': '',
+    'password': '',
+}
+df_part2 = ImportAcceptTaskName(owners,IDsmartcare)
+print(df_part2)
+
+"""
+# ===== 13. ฟังก์ชันสร้างและนำเข้าข้อมูลเข้าฐานข้อมูล (Create and Insert Data to Database) =====
+"""
+def CreateAndInsertData(sas, df_part2):
+    try:
+        # สร้าง LIBNAME statement สำหรับเชื่อมต่อกับ SQL Server
+        libname_stmt = """
+        LIBNAME SQLDB SQLSVR
+        DATASRC=
+        SCHEMA=dbo
+        AUTHDOMAIN=;
+        """
+        sas.submit(libname_stmt)
+
+        # แปลงทุกคอลัมน์เป็น string (VARCHAR) และจัดการค่า NULL
+        for col in df_part2.columns:
+            df_part2[col] = df_part2[col].astype(str).replace('nan', 'NULL')
+           
+        # สำหรับ CreateDate โดยเฉพาะ ให้คงค่า NULL ไว้
+        df_part2['CreateDate'] = df_part2['CreateDate'].replace('NULL', None)
+
+        print("ข้อมูลใน DataFrame หลังแปลงเป็น VARCHAR และจัดการค่า NULL:")
+        print(df_part2.head())
+        print(df_part2.dtypes)
+
+        # ตรวจสอบว่ามีข้อมูลใน DataFrame หรือไม่
+        if df_part2.empty:
+            print("ไม่มีข้อมูลที่จะ insert หลังจากการแปลงและกรองข้อมูล")
+            return
+
+        print(f"Total rows in DataFrame: {len(df_part2)}")
+
+        # เรียกใช้ stored procedure เพื่อลบข้อมูลเก่าก่อน
+        delete_call = """
+        PROC SQL;
+            CONNECT TO SQLSVR AS SQLDB (DATASRC= AUTHDOMAIN=mssqlauth);
+            EXECUTE (
+                EXEC dbo.sp_UpdateTask_Incentive @OperationType = 'D'
+            ) BY SQLDB;
+            DISCONNECT FROM SQLDB;
+        QUIT;
+        """
+        sas.submit(delete_call)
+        print("ลบข้อมูลเก่าเรียบร้อยแล้ว")
+
+        # ทำการ Insert ข้อมูลใหม่
+        for index, row in df_part2.iterrows():
+            print(f"Inserting row {index+1}/{len(df_part2)}")
+
+            # Escape single quotes in string values และจัดการค่า NULL
+            row = row.apply(lambda x: 'NULL' if x is None else str(x).replace("'", "''"))
+
+            create_date_value = 'NULL' if row['CreateDate'] is None else f"'{row['CreateDate']}'"
+
+            sp_call = f"""
+            PROC SQL;
+                CONNECT TO SQLSVR AS SQLDB (DATASRC= AUTHDOMAIN=mssqlauth);
+                EXECUTE (
+                    EXEC dbo.sp_UpdateTask_Incentive
+                        @TicketId = '{row['TicketId']}',
+                        @Description = '{row['Description']}',
+                        @AcceptTask_By = '{row['AcceptTask_By']}',
+                        @AcceptTask_Name = '{row['AcceptTask_Name']}',
+                        @AcceptTask_TEAM = '{row['AcceptTask_TEAM']}',
+                        @CreateDate = {create_date_value},
+                        @OperationType = 'B'
+                ) BY SQLDB;
+                DISCONNECT FROM SQLDB;
+            QUIT;
+            """
+            result = sas.submit(sp_call)
+            if result.get('LOG'):
+                print(f"Log output for row {index+1}:", result['LOG'])
+
+        print("Insert ข้อมูลเรียบร้อยแล้ว")
+
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาด: {e}")
+        traceback.print_exc()
+"""
+# ===== 14. การเริ่มและจบเซสชัน SAS =====
+"""
+# สร้างการเชื่อมต่อ SAS (ถ้ายังไม่ได้สร้าง)
+sas = saspy.SASsession(cfgname='winiomwin')
+
+# ใช้งานฟังก์ชันสร้างและ insert ข้อมูล
+if not df_part2.empty:
+    CreateAndInsertData(sas, df_part2)
+else:
+    print("df_part2 ไม่มีข้อมูล (empty)")
+
+# ปิดการเชื่อมต่อ SAS
+sas.endsas()
+"""
+# ===== 15. การอัปเดตข้อมูลในไฟล์ Excel =====
+"""
+import pandas as pd
+import openpyxl
+
+# โหลดไฟล์ Excel
+files = {
+    # 'file1': 'path_to_file1.xlsx',
+    # 'file2': 'path_to_file2.xlsx',
+    # 'file3': 'path_to_file3.xlsx'
+}
+
+# Loop ผ่านแต่ละไฟล์
+for file_name, file_path in files.items():
+    # โหลดข้อมูลใน Excel ไฟล์
+    df_excel = pd.read_excel(file_path)
+
+    # แปลงค่าใน 'Owner' และ 'AcceptTask_By' เป็น string และลบช่องว่าง
+    df_excel['Owner'] = df_excel['Owner'].astype(str).str.strip()
+    df_part2['AcceptTask_By'] = df_part2['AcceptTask_By'].astype(str).str.strip()
+
+    # แสดงข้อมูล Owner ในไฟล์ Excel และ df_part2 เพื่อการตรวจสอบ
+    print("ข้อมูล Owner ในไฟล์:", df_excel['Owner'].tolist())
+    print("ข้อมูลใน df_part2:", df_part2)
+
+    # คัดกรองข้อมูลจาก df_part2 ที่ตรงกับ Owner ในไฟล์ Excel
+    matching_rows = df_part2[df_part2['AcceptTask_By'].isin(df_excel['Owner'])]
+
+    if not matching_rows.empty:
+        # เปิดไฟล์ด้วย openpyxl เพื่อทำการเขียนข้อมูล
+        book = openpyxl.load_workbook(file_path)
+        sheet = book.active
+
+        # หาช่องว่างในไฟล์ Excel และเติมข้อมูลลงไป
+        for _, row in matching_rows.iterrows():
+            for i in range(1, sheet.max_row + 2):  # +2 เพื่อให้แน่ใจว่าแถวใหม่จะถูกใช้
+                if sheet.cell(row=i, column=3).value is None:  # ตรวจสอบว่าแถวนี้ว่างหรือไม่
+                    # sheet.cell(row=i, column=2).value = "Smartcare"
+                    sheet.cell(row=i, column=3).value = f"{row['TicketId']} + {row['Description']}"
+                    # sheet.cell(row=i, column=5).value = "New"
+                    # sheet.cell(row=i, column=6).value = row['AcceptTask_By']
+                    break
+
+        # บันทึกไฟล์ Excel
+        book.save(file_path)
+        print(f"ข้อมูลถูกบันทึกลงในไฟล์ {file_name} เรียบร้อยแล้ว")
+
+    else:
+        print(f"ไม่มีข้อมูลที่ตรงกันในไฟล์ {file_name}")
+"""
+# ===== 16. การส่งการแจ้งเตือนเมื่อสิ้นสุดการทำงาน=====
+"""
+send_line_notification(CONFIG['line_token'], message="🎉✅🏆 --- End of all user notifications --- 🏆✅🎉")
