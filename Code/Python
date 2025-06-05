@@ -1,4 +1,3 @@
-โค้ด Python ทั้งหมด
 """
 # ===== 1. การนำเข้าไลบรารีที่จำเป็น (Import Libraries) =====
 """
@@ -10,8 +9,10 @@ import traceback
 import numpy as np
 import warnings
 import re
-from datetime import datetime
 import os
+
+from datetime import datetime
+
 warnings.filterwarnings('ignore', category=UserWarning)
 
 """
@@ -19,21 +20,17 @@ warnings.filterwarnings('ignore', category=UserWarning)
 """
 def get_file_modified_date(file_path):
     timestamp = os.path.getmtime(file_path)
-    print("Timestamp:", timestamp)
     return datetime.fromtimestamp(timestamp)
 
-def format_date_column(data, column_name):  # การปรับเปลี่ยน Format ของค่าเวลาต่าง ให้สามารถส่งเข้า Database ได้
+def format_date_column(data, column_name):
     if column_name in data.columns:
         data[column_name] = pd.to_datetime(data[column_name], errors='coerce')
         data[column_name] = data[column_name].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else 'Unknown Date')
-    else:
-        print(f"Column '{column_name}' not found in data")
 
 """
 # ===== 3. ฟังก์ชันการส่งการแจ้งเตือนผ่าน Line (Line Notification Function) =====
 """
-def send_line_notification(token, message, sticker_package_id=None, sticker_id=None): # เป็นฟังก์ชั่นเรียกใช้ Line notify ให้สามารถส่งไลน์ได้
-    """Send notification to LINE using the LINE Notify API."""
+def send_line_notification(token, message, sticker_package_id=None, sticker_id=None):
     url = "https://notify-api.line.me/api/notify"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/x-www-form-urlencoded"}
     data = {"message": message}
@@ -41,7 +38,8 @@ def send_line_notification(token, message, sticker_package_id=None, sticker_id=N
         data["stickerPackageId"] = sticker_package_id
         data["stickerId"] = sticker_id
     response = requests.post(url, headers=headers, data=data)
-    print(f"Notification sent with status code: {response.status_code}")
+    print(f"LINE notification sent: {response.status_code}")
+
 
 """
 # ===== 4. ฟังก์ชันช่วยเหลือสำหรับการจัดการข้อมูล (Helper Functions for Data Management) =====
@@ -53,6 +51,7 @@ def escape_single_quotes(value): #เป็นการเพิ่มค่า 
 
 def format_alert_message(No, old_date, new_date): #รูปแบบการส่งค่าของการเปลี่ยนแปลง
     return f" No: {No}\n - From: {old_date} ➡️ To: {new_date}"
+
 """
 # ===== 5. ฟังก์ชันอัพเดทข้อมูลงานและแรงจูงใจ (Task Incentive Update Function) =====
 """
@@ -63,9 +62,6 @@ def update_task_incentive(excel_file_path, user_name, usercheck, animal_emoji): 
         data.replace('nan', np.nan, inplace=True)  # Replace 'nan' string with np.nan if any
         data.dropna(subset=['Task'], inplace=True) # ลบแถวที่ไม่มีค่าในคอลัมน์ Task
         if 'No' in data.columns:
-            # data['No'] = data['No'].apply(lambda x: str(int(x)) if pd.notna(x) and x != '' else x)
-            # data.dropna(subset=['No'], inplace=True)
-            # data['No'] = usercheck + data['No'].str.zfill(2)
             data['No'] = data['No'].apply(lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) else str(x).strip())
 
             data.dropna(subset=['No'], inplace=True)
@@ -80,14 +76,14 @@ def update_task_incentive(excel_file_path, user_name, usercheck, animal_emoji): 
             for col in data.select_dtypes(include=[object]).columns:
                 data[col] = data[col].map(escape_single_quotes)
            
-            sas = saspy.SASsession(cfgname='winiomwin')
-            # print(sas.saslog())
+            sas = saspy.SASsession(cfgname='YOUR_SAS_CONFIG_NAME')
+            
             #เป็นการประกาศใช้เส้นทางของ SAS เพื่อส่งข้อมูลไป Database
             libname_statement = """
             LIBNAME SQLSVR
-                DATASRC= 
+                DATASRC=YOUR_DATABASE_CONNECTION_STRING
                 SCHEMA=dbo
-                AUTHDOMAIN=mssqlauth;
+                AUTHDOMAIN=YOUR_AUTH_DOMAIN;
             """
             sas.submit(libname_statement)
             modified_date = get_file_modified_date(excel_file_path).strftime('%Y-%m-%d %H:%M:%S')
@@ -95,11 +91,11 @@ def update_task_incentive(excel_file_path, user_name, usercheck, animal_emoji): 
             for index, row in data.iterrows():#วนลูปจากค่าใน row ไฟล์ทั้งหมด
                 update_query = f"""
                 PROC SQL;
-                    CONNECT TO SQLSVR AS (DATASRC= AUTHDOMAIN=mssqlauth);
+                    CONNECT TO SQLSVR AS DB_CONN (DATASRC=YOUR_DATABASE_CONNECTION_STRING AUTHDOMAIN=YOUR_AUTH_DOMAIN);
                     CREATE TABLE WORK.UpdateResult AS
                     SELECT *, '{row['Due Date']}' AS NewDueDate
-                    FROM CONNECTION TO  (
-                        EXEC dbo.sp_UpdateTask_Incentive
+                    FROM CONNECTION TO DB_CONN (
+                        EXEC dbo.sp_SPname
                             @No = '{row['No']}' ,
                             @Type = '{row['Type']}' ,
                             @Task = '{row['Task']}' ,
@@ -114,7 +110,7 @@ def update_task_incentive(excel_file_path, user_name, usercheck, animal_emoji): 
                             @ModifiedDate = '{modified_date}' ,
                             @OperationType = 'U'
                     );
-                    DISCONNECT FROM ;
+                    DISCONNECT FROM DB_CONN;
                 QUIT;
                 """
                 result = sas.submit(update_query)
@@ -146,26 +142,26 @@ def process_tasks(user_name, usercheck, animal_emoji, line_token):
     print(f"{animal_emoji} User: {user_name}\n🚨 Alerts: Due Date Change")
     messages = []
     try:
-        sas = saspy.SASsession(cfgname='winiomwin')
+        sas = saspy.SASsession(cfgname='YOUR_SAS_CONFIG_NAME')
        
         # Execute the stored procedure to retrieve tasks
         libname_statement = """
         LIBNAME SQLSVR
-            DATASRC=
+            DATASRC=YOUR_DATABASE_CONNECTION_STRING
             SCHEMA=dbo
-            AUTHDOMAIN=mssqlauth;
+            AUTHDOMAIN=YOUR_AUTH_DOMAIN;
         """
         sas.submit(libname_statement)
        
         proc_sql_query = """
         PROC SQL;
-            CONNECT TO SQLSVR AS (DATASRC=AUTHDOMAIN=mssqlauth);
+            CONNECT TO SQLSVR AS DB_CONN (DATASRC=YOUR_DATABASE_CONNECTION_STRING AUTHDOMAIN=YOUR_AUTH_DOMAIN);
             CREATE TABLE WORK.TaskResults AS
             SELECT *
-            FROM CONNECTION TO (
-                EXEC sp_UpdateTask_Incentive @OperationType = 'R'
+            FROM CONNECTION TO DB_CONN (
+                EXEC sp_SPname @OperationType = 'R'
             );
-            DISCONNECT FROM;
+            DISCONNECT FROM DB_CONN;
         QUIT;
         """
         sas.submit(proc_sql_query)
@@ -194,9 +190,9 @@ def process_tasks(user_name, usercheck, animal_emoji, line_token):
                     continue  # Skip this result if the date format is incorrect
                    
                 days_difference = (due_date - current_datetime).days    
-#ค่าของduedate ที่ดึงมาลบกับเวลาปัจจุบัน
+                #ค่าของduedate ที่ดึงมาลบกับเวลาปัจจุบัน
                 day_Newdifference = (plan_start - current_datetime).days 
-#ค่าของplan_start ที่ดึงมาลบกับเวลาปัจจุบัน
+                #ค่าของplan_start ที่ดึงมาลบกับเวลาปัจจุบัน
                 task_detail = f"- Task: {result['Task']}, Status: {result['Status']}"
 
                 if result['Status'] == 'DOING':
@@ -244,12 +240,13 @@ def process_tasks(user_name, usercheck, animal_emoji, line_token):
 # ===== 7. การกำหนดค่าคงที่และการเรียกใช้ฟังก์ชัน (Configuration and Function Calls) =====
 """
 CONFIG = {
-    'line_token': 'LineTokenGroup',
+    'line_token': 'YOUR_LINE_TOKEN_HERE',
 }
 
 if __name__ == "__main__":
     user_configs = [
-        {'path': 'NamePath', 'user_name': 'nickname', 'usercheck': 'M', 'animal_emoji': ''},
+        {'path': 'path/to/your/excel/file.xlsx', 'user_name': 'User1', 'usercheck': 'M', 'animal_emoji': '🐱'},
+        {'path': 'path/to/your/excel/file2.xlsx', 'user_name': 'User2', 'usercheck': 'B', 'animal_emoji': '🐕'},
     ]
 
     # Process each user's task
@@ -264,11 +261,11 @@ def ImportDataTaskWork(sas):
     try:
         sas_code = """
         PROC SQL;
-        CONNECT TO SQLSVR AS myconn (DATASRC= AUTHDOMAIN=mssqlauth);
+        CONNECT TO SQLSVR AS myconn (DATASRC=YOUR_DATABASE_CONNECTION_STRING AUTHDOMAIN=YOUR_AUTH_DOMAIN);
         CREATE TABLE WORK.TaskData AS
         SELECT *
         FROM CONNECTION TO myconn (
-            EXEC sp_UpdateTask_Incentive @OperationType = 'C'
+            EXEC sp_SPname @OperationType = 'C'
         );
         DISCONNECT FROM myconn;
         QUIT;
@@ -308,11 +305,11 @@ def ImportDataTaskUser(sas, columns_to_select=None):
 
         sas_code = f"""
         PROC SQL;
-        CONNECT TO SQLSVR AS myconn (DATASRC= AUTHDOMAIN=mssqlauth);
+        CONNECT TO SQLSVR AS myconn (DATASRC=YOUR_DATABASE_CONNECTION_STRING AUTHDOMAIN=YOUR_AUTH_DOMAIN);
         CREATE TABLE WORK.TasklistEmp AS
         SELECT {select_columns}
         FROM CONNECTION TO myconn (
-            SELECT {select_columns} FROM Tasklist_emp_mis
+            SELECT {select_columns} FROM Employee_Table
         );
         DISCONNECT FROM myconn;
         QUIT;
@@ -334,9 +331,9 @@ def create_sql_table_from_df(sas, df, table_name):
         # Establish connection to SQL Server using LIBNAME
         libname_statement = """
             LIBNAME SQLSVR
-            DATASRC=
+            DATASRC=YOUR_DATABASE_CONNECTION_STRING
             SCHEMA=dbo
-            AUTHDOMAIN=mssqlauth;
+            AUTHDOMAIN=YOUR_AUTH_DOMAIN;
         """
         sas.submit(libname_statement)
         print(f"Total rows in DataFrame: {len(df)}")
@@ -348,15 +345,15 @@ def create_sql_table_from_df(sas, df, table_name):
             row_escaped = row.apply(lambda x: str(x).replace("'", "''") if pd.notnull(x) else '')
 
             # Formatting specific date fields correctly
-            # ??????????? CONVERT ?? SQL ?????????????????????????????????? 'YYYY-MM-DD'
             work_completed = f"'{row_escaped['Work Completed']}'" if row_escaped['Work Completed'] != '' else 'NULL'
             start_record_date = f"'{row_escaped['Start_Record_Date']}'" if row_escaped['Start_Record_Date'] != '' else 'NULL'
+            
             # SQL to call the stored procedure with the parameters from the DataFrame row
             sp_call = f"""
             PROC SQL;
-                CONNECT TO SQLSVR AS (DATASRC=  AUTHDOMAIN=mssqlauth);
+                CONNECT TO SQLSVR AS DB_CONN (DATASRC=YOUR_DATABASE_CONNECTION_STRING  AUTHDOMAIN=YOUR_AUTH_DOMAIN);
                 EXECUTE (
-                    EXEC dbo.sp_UpdateTask_Incentive
+                    EXEC dbo.sp_SPname
                         @No = '{row_escaped['No']}',
                         @Type = '{row_escaped['Type']}',
                         @IDsmartcare = '{row_escaped['IDsmartcare']}',
@@ -378,8 +375,8 @@ def create_sql_table_from_df(sas, df, table_name):
                         @USR_EMAIL = '{row_escaped['USR_EMAIL']}',
                         @nickname_eng = '{row_escaped['nickname_eng']}',
                         @OperationType = 'A'
-                ) BY ;
-                DISCONNECT FROM ;
+                ) BY DB_CONN;
+                DISCONNECT FROM DB_CONN;
             QUIT;
             """
             print(sp_call)
@@ -396,29 +393,33 @@ def create_sql_table_from_df(sas, df, table_name):
 # ===== 10. การเรียกใช้ฟังก์ชันนำเข้าและประมวลผลข้อมูล (Execution of Import and Processing Functions) =====
 """
 # Example usage:
-sas = saspy.SASsession(cfgname='winiomwin')
-# ตั้งค่าเส้นทางการเชื่อมต่อกับ SQL Server
-libname_statement = """
-LIBNAME  SQLSVR
-    DATASRC=
-    SCHEMA=dbo
-    AUTHDOMAIN=mssqlauth;
-"""
-sas.submit(libname_statement)
+def main_execution():
+    sas = saspy.SASsession(cfgname='YOUR_SAS_CONFIG_NAME')
+    # ตั้งค่าเส้นทางการเชื่อมต่อกับ SQL Server
+    libname_statement = """
+    LIBNAME  SQLSVR
+        DATASRC=YOUR_DATABASE_CONNECTION_STRING
+        SCHEMA=dbo
+        AUTHDOMAIN=YOUR_AUTH_DOMAIN;
+    """
+    sas.submit(libname_statement)
 
-columns_to_select = ['EMPID', 'fname_eng', 'lname_eng', 'USR_EMAIL', 'nickname_eng']
-df_task_user = ImportDataTaskUser(sas, columns_to_select=columns_to_select)
-df_task_work = ImportDataTaskWork(sas)
+    columns_to_select = ['EMPID', 'fname_eng', 'lname_eng', 'USR_EMAIL', 'nickname_eng']
+    df_task_user = ImportDataTaskUser(sas, columns_to_select=columns_to_select)
+    df_task_work = ImportDataTaskWork(sas)
 
-if not df_task_user.empty and not df_task_work.empty:
-    df_joined = pd.merge(df_task_work, df_task_user, how='inner', left_on='Owner', right_on='EMPID')
-    print(df_joined)
-   
-    create_sql_table_from_df(sas, df_joined, 'Tasklist_Incentive_FullDataEmp')
-else:
-    print("DataFrame ใดตัวหนึ่งหรือทั้งสองตัวว่างเปล่า ไม่สามารถทำการ Join ได้")
+    if not df_task_user.empty and not df_task_work.empty:
+        df_joined = pd.merge(df_task_work, df_task_user, how='inner', left_on='Owner', right_on='EMPID')
+        print(df_joined)
+       
+        create_sql_table_from_df(sas, df_joined, 'Table_2')
+    else:
+        print("DataFrame ใดตัวหนึ่งหรือทั้งสองตัวว่างเปล่า ไม่สามารถทำการ Join ได้")
 
-sas.endsas()
+    sas.endsas()
+
+# Uncomment the line below to run the main execution
+# main_execution()
 
 """
 # ===== 11. การนำเข้าข้อมูลที่มี IDSmartcare (Import Data with IDSmartcare) =====
@@ -437,7 +438,7 @@ def ImportDataWithIDSmartcare(sas):
         LIBNAME SQLDB SQLSVR
         DATASRC=
         SCHEMA=dbo
-        AUTHDOMAIN=mssqlauth;
+        AUTHDOMAIN=;
         """
         sas.submit(libname_stmt)
 
