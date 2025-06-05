@@ -1,1 +1,212 @@
+"""
+# ===== 1. การตั้งค่าและประกาศพารามิเตอร์ (Setup and Parameter Declaration) =====
+"""
+ALTER PROCEDURE [dbo].[ sp_SPname]
+@No VARCHAR(10) = NULL,
+@Type VARCHAR(MAX) = NULL,
+@IDsmartcare VARCHAR(MAX) = NULL,
+@Task VARCHAR(MAX) = NULL,
+@DueDate VARCHAR(MAX) = NULL,
+@Status VARCHAR(MAX) = NULL,
+@Owner VARCHAR(MAX) = NULL,
+@PlanStartDate VARCHAR(MAX) = NULL,
+@PlanEndDate VARCHAR(MAX) = NULL,
+@Remark VARCHAR(MAX) = NULL,
+@Time VARCHAR(MAX) = NULL,
+@Percent VARCHAR(MAX) = NULL,
+@WorkCompleted DATE = NULL,
+@ModifiedDate VARCHAR(MAX) = NULL,
+@StartRecordDate DATE = NULL,
+@EMPID VARCHAR(MAX) = NULL,
+@fname_eng VARCHAR(MAX) = NULL,
+@lname_eng VARCHAR(MAX) = NULL,
+@USR_EMAIL VARCHAR(MAX) = NULL,
+@nickname_eng VARCHAR(MAX) = NULL,
+@TicketId VARCHAR(MAX) = NULL,
+@Description VARCHAR(MAX) = NULL,
+@AcceptTask_By VARCHAR(MAX) = NULL,
+@AcceptTask_Name VARCHAR(MAX) = NULL,
+@AcceptTask_TEAM VARCHAR(MAX) = NULL,
+@CreateDate VARCHAR(MAX) = NULL,
+@OperationType CHAR(1) = 'U'  -- 'U' for Update/Insert, 'R' for Retrieve, 'A' for Alternative Table Update/Insert
 
+"""
+# ===== 2. การตรวจสอบและสร้างคอลัมน์ในตาราง (Column Existence Check and Creation) =====
+"""
+-- Check if the column [Work Completed] exists, if not, add it using dynamic SQL
+IF COL_LENGTH('Table_1', 'Work Completed') IS NULL
+BEGIN
+    EXEC sp_executesql N'ALTER TABLE Table_1 ADD [Work Completed] DATE';
+END
+IF COL_LENGTH('Table_1', 'Modified Date') IS NULL
+BEGIN
+    EXEC sp_executesql N'ALTER TABLE Table_1 ADD [Modified Date] VARCHAR(MAX)';
+END
+IF COL_LENGTH('Table_1', 'Start_Record_Date') IS NULL
+BEGIN
+    EXEC sp_executesql N'ALTER TABLE Table_1 ADD [Start_Record_Date] DATE';
+END
+
+"""
+# ===== 3. การจัดการกรณี Update/Insert (Operation Type 'U') =====
+"""
+-- Handle OperationType = 'U' (Update/Insert for Table_1)
+IF @OperationType = 'U'
+BEGIN
+    SET @Owner = CASE
+        WHEN @Owner LIKE '%.0' THEN LEFT(@Owner, LEN(@Owner) - 2)
+        ELSE @Owner
+    END;
+
+    IF EXISTS (SELECT 1 FROM Table_1 WHERE No = @No)
+    BEGIN
+        DECLARE @CurrentStatus VARCHAR(255);
+        SELECT @CurrentStatus = Status FROM Table_1 WHERE No = @No;
+
+        -- Update existing task in Table_1
+        DECLARE @UpdateSQL NVARCHAR(MAX) = N'
+        UPDATE Table_1
+        SET Type = COALESCE(NULLIF(@Type, ''''), Type),
+            Task = COALESCE(NULLIF(@Task, ''''), Task),
+            [Due Date] = COALESCE(NULLIF(@DueDate, ''''), [Due Date]),
+            Status = COALESCE(NULLIF(@Status, ''''), Status),
+            Owner = COALESCE(NULLIF(@Owner, ''''), Owner),
+            [Plan Start Date] = COALESCE(NULLIF(@PlanStartDate, ''''), [Plan Start Date]),
+            [Plan End Date] = COALESCE(NULLIF(@PlanEndDate, ''''), [Plan End Date]),
+            Remark = COALESCE(NULLIF(@Remark, ''''), Remark),
+            Time = COALESCE(NULLIF(@Time, ''''), Time),
+            [Percent] = COALESCE(NULLIF(@Percent, ''''), [Percent]),
+            [Modified Date] = COALESCE(NULLIF(@ModifiedDate, ''''), [Modified Date]),
+            [Work Completed] = CASE
+                WHEN @Status = ''DONE'' AND @CurrentStatus NOT IN (''DONE'') THEN CONVERT(DATE, GETDATE())
+                ELSE [Work Completed]
+            END
+        WHERE No = @No';
+        EXEC sp_executesql @UpdateSQL,
+            N'@No VARCHAR(10), @Type VARCHAR(MAX), @Task VARCHAR(MAX), @DueDate VARCHAR(MAX), @Status VARCHAR(MAX), @Owner VARCHAR(MAX), @PlanStartDate VARCHAR(MAX), @PlanEndDate VARCHAR(MAX), @Remark VARCHAR(MAX), @Time VARCHAR(MAX), @Percent VARCHAR(MAX), @ModifiedDate VARCHAR(MAX), @CurrentStatus VARCHAR(255)',
+            @No, @Type, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @ModifiedDate, @CurrentStatus;
+    END
+    ELSE
+    BEGIN
+        -- Insert a new task if no existing record in Table_1
+        IF @Task IS NOT NULL AND LTRIM(RTRIM(@Task)) <> '' AND LOWER(@Task) <> 'nan'
+        BEGIN
+            DECLARE @InsertSQL NVARCHAR(MAX) = N'
+            INSERT INTO Table_1
+            (No, Type, Task, [Due Date], Status, Owner, [Plan Start Date], [Plan End Date], Remark, Time, [Percent], [Modified Date], [Start_Record_Date], [Work Completed])
+            VALUES
+            (@No, @Type, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @ModifiedDate, CONVERT(DATE, GETDATE()), NULL)';
+            EXEC sp_executesql @InsertSQL,
+                N'@No VARCHAR(10), @Type VARCHAR(MAX), @Task VARCHAR(MAX), @DueDate VARCHAR(MAX), @Status VARCHAR(MAX), @Owner VARCHAR(MAX), @PlanStartDate VARCHAR(MAX), @PlanEndDate VARCHAR(MAX), @Remark VARCHAR(MAX), @Time VARCHAR(MAX), @Percent VARCHAR(MAX), @ModifiedDate VARCHAR(MAX)',
+                @No, @Type, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @ModifiedDate;
+        END
+    END
+END
+
+"""
+# ===== 4. การดึงข้อมูลจากตาราง (Operation Type 'R' - Retrieve) =====
+"""
+ELSE IF @OperationType = 'R'
+BEGIN
+    -- Retrieve tasks based on specified conditions
+    SELECT No, Task, [Due Date], Status, [Plan Start Date]
+    FROM Table_1
+    WHERE (Status = 'DOING' AND [Due Date] <> 'Unknown Date')
+       OR (Status = 'NEW' AND [Plan Start Date] <> 'Unknown Date');
+END
+
+"""
+# ===== 5. การดึงข้อมูลทั้งหมด (Operation Type 'C' - Complete Retrieve) =====
+"""
+ELSE IF @OperationType = 'C'
+BEGIN
+    -- Retrieve all tasks
+    SELECT * FROM Table_1;
+END
+
+"""
+# ===== 6. การจัดการตารางข้อมูลพนักงานเต็มรูปแบบ (Operation Type 'A' - Alternative Table) =====
+"""
+
+ELSE IF @OperationType = 'A'
+BEGIN
+    -- Trim and remove trailing '.0' from @Owner
+    SET @Owner = CASE
+        WHEN @Owner LIKE '%.0' THEN LEFT(@Owner, LEN(@Owner) - 2)
+        ELSE @Owner
+    END;
+
+    -- Check if the record exists
+    IF EXISTS (SELECT 1 FROM Table_2 WHERE No = @No)
+    BEGIN
+        -- Update existing record in Table_2
+        DECLARE @UpdateSQL_A NVARCHAR(MAX) = N'
+        UPDATE Table_2
+        SET Type = COALESCE(NULLIF(@Type, ''''), Type),
+            IDsmartcare = COALESCE(NULLIF(@IDsmartcare, ''''), IDsmartcare),
+            Task = COALESCE(NULLIF(@Task, ''''), Task),
+            [Due Date] = COALESCE(NULLIF(@DueDate, ''''), [Due Date]),
+            Status = COALESCE(NULLIF(@Status, ''''), Status),
+            Owner = COALESCE(NULLIF(@Owner, ''''), Owner),
+            [Plan Start Date] = COALESCE(NULLIF(@PlanStartDate, ''''), [Plan Start Date]),
+            [Plan End Date] = COALESCE(NULLIF(@PlanEndDate, ''''), [Plan End Date]),
+            Remark = COALESCE(NULLIF(@Remark, ''''), Remark),
+            Time = COALESCE(NULLIF(@Time, ''''), Time),
+            [Percent] = COALESCE(NULLIF(@Percent, ''''), [Percent]),
+            [Work Completed] = COALESCE(NULLIF(@WorkCompleted, ''''), [Work Completed]),
+            [Modified Date] = COALESCE(NULLIF(@ModifiedDate, ''''), [Modified Date]),
+            [Start_Record_Date] = COALESCE(NULLIF(@StartRecordDate, ''''), [Start_Record_Date]),
+            EMPID = COALESCE(NULLIF(@EMPID, ''''), EMPID),
+            fname_eng = COALESCE(NULLIF(@fname_eng, ''''), fname_eng),
+            lname_eng = COALESCE(NULLIF(@lname_eng, ''''), lname_eng),
+            USR_EMAIL = COALESCE(NULLIF(@USR_EMAIL, ''''), USR_EMAIL),
+            nickname_eng = COALESCE(NULLIF(@nickname_eng, ''''), nickname_eng)
+        WHERE No = @No';
+        EXEC sp_executesql @UpdateSQL_A,
+            N'@No VARCHAR(10), @Type VARCHAR(MAX), @IDsmartcare VARCHAR(MAX), @Task VARCHAR(MAX), @DueDate VARCHAR(MAX), @Status VARCHAR(MAX), @Owner VARCHAR(MAX), @PlanStartDate VARCHAR(MAX), @PlanEndDate VARCHAR(MAX), @Remark VARCHAR(MAX), @Time VARCHAR(MAX), @Percent VARCHAR(MAX), @WorkCompleted DATE, @ModifiedDate VARCHAR(MAX), @StartRecordDate DATE, @EMPID VARCHAR(MAX), @fname_eng VARCHAR(MAX), @lname_eng VARCHAR(MAX), @USR_EMAIL VARCHAR(MAX), @nickname_eng VARCHAR(MAX)',
+            @No, @Type, @IDsmartcare, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @WorkCompleted, @ModifiedDate, @StartRecordDate, @EMPID, @fname_eng, @lname_eng, @USR_EMAIL, @nickname_eng;
+    END
+    ELSE
+    BEGIN
+        -- Insert a new task into Table_2
+        IF @Task IS NOT NULL AND LTRIM(RTRIM(@Task)) <> '' AND LOWER(@Task) <> 'nan'
+        BEGIN
+            DECLARE @InsertSQL_A NVARCHAR(MAX) = N'
+            INSERT INTO Table_2
+            (No, Type, IDsmartcare, Task, [Due Date], Status, Owner, [Plan Start Date], [Plan End Date], Remark, Time, [Percent], [Work Completed], [Modified Date], [Start_Record_Date], EMPID, fname_eng, lname_eng, USR_EMAIL, nickname_eng)
+            VALUES
+            (@No, @Type, @IDsmartcare, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @WorkCompleted, @ModifiedDate, @StartRecordDate, @EMPID, @fname_eng, @lname_eng, @USR_EMAIL, @nickname_eng)';
+            EXEC sp_executesql @InsertSQL_A,
+                N'@No VARCHAR(10), @Type VARCHAR(MAX), @IDsmartcare VARCHAR(MAX), @Task VARCHAR(MAX), @DueDate VARCHAR(MAX), @Status VARCHAR(MAX), @Owner VARCHAR(MAX), @PlanStartDate VARCHAR(MAX), @PlanEndDate VARCHAR(MAX), @Remark VARCHAR(MAX), @Time VARCHAR(MAX), @Percent VARCHAR(MAX), @WorkCompleted DATE, @ModifiedDate VARCHAR(MAX), @StartRecordDate DATE, @EMPID VARCHAR(MAX), @fname_eng VARCHAR(MAX), @lname_eng VARCHAR(MAX), @USR_EMAIL VARCHAR(MAX), @nickname_eng VARCHAR(MAX)',
+                @No, @Type, @IDsmartcare, @Task, @DueDate, @Status, @Owner, @PlanStartDate, @PlanEndDate, @Remark, @Time, @Percent, @WorkCompleted, @ModifiedDate, @StartRecordDate, @EMPID, @fname_eng, @lname_eng, @USR_EMAIL, @nickname_eng;
+        END
+    END
+END
+
+"""
+# ===== 7. การลบข้อมูลทั้งหมดจากตาราง (Operation Type 'D' - Delete) =====
+"""
+ELSE IF @OperationType = 'D'
+BEGIN
+    -- Delete all records from Table_3
+    Delete FROM Table_3;
+END
+
+"""
+# ===== 8. การเพิ่มข้อมูลใหม่เกี่ยวกับงาน Smartcare (Operation Type 'B' - Batch Insert) =====
+"""
+
+ELSE IF @OperationType = 'B'
+BEGIN
+    -- Insert new record into Table_3
+    INSERT INTO Table_3
+    (TicketId, Description, AcceptTask_By, AcceptTask_Name, AcceptTask_TEAM, CreateDate)
+    VALUES
+    (@TicketId, @Description, @AcceptTask_By, @AcceptTask_Name, @AcceptTask_TEAM,
+     CASE WHEN @CreateDate = '' THEN NULL ELSE @CreateDate END);
+END
+
+"""
+# ===== 9. การคืนค่าวันที่ครบกำหนดเดิม (Return Old Due Date) =====
+"""
+SELECT @OldDueDate AS OldDueDate;
